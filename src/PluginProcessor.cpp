@@ -1,49 +1,27 @@
 #include "PluginProcessor.h"
 
 #include "PluginEditor.h"
-#include "signalsmith/signalsmith-stretch.h"
 
 AudioPluginAudioProcessor::AudioPluginAudioProcessor()
-    : AudioProcessor(
-          BusesProperties()
-#if !JucePlugin_IsMidiEffect
-#if !JucePlugin_IsSynth
-              .withInput("Input", juce::AudioChannelSet::stereo(), true)
-#endif
-              .withOutput("Output", juce::AudioChannelSet::stereo(), true)
-#endif
-      )
-    , apvts(*this, nullptr, "Parameters", createParameterLayout()) {
+    : AudioProcessor(BusesProperties().withOutput("Output", juce::AudioChannelSet::stereo(), true)) {
 }
 
-AudioPluginAudioProcessor::~AudioPluginAudioProcessor() { }
+AudioPluginAudioProcessor::~AudioPluginAudioProcessor() = default;
 
 const juce::String AudioPluginAudioProcessor::getName() const {
     return JucePlugin_Name;
 }
 
 bool AudioPluginAudioProcessor::acceptsMidi() const {
-#if JucePlugin_WantsMidiInput
     return true;
-#else
-    return false;
-#endif
 }
 
 bool AudioPluginAudioProcessor::producesMidi() const {
-#if JucePlugin_ProducesMidiOutput
-    return true;
-#else
     return false;
-#endif
 }
 
 bool AudioPluginAudioProcessor::isMidiEffect() const {
-#if JucePlugin_IsMidiEffect
-    return true;
-#else
     return false;
-#endif
 }
 
 double AudioPluginAudioProcessor::getTailLengthSeconds() const {
@@ -51,10 +29,7 @@ double AudioPluginAudioProcessor::getTailLengthSeconds() const {
 }
 
 int AudioPluginAudioProcessor::getNumPrograms() {
-    return 1; // NB: some hosts don't cope very well if you tell them there are 0
-              // programs,
-              // so this should be at least 1, even if you're not really implementing
-              // programs.
+    return 1;
 }
 
 int AudioPluginAudioProcessor::getCurrentProgram() {
@@ -75,112 +50,62 @@ void AudioPluginAudioProcessor::changeProgramName(int index, const juce::String&
 }
 
 void AudioPluginAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock) {
-    int numChannels = getTotalNumInputChannels();
-
-    int blockSamples = 2048;
-    int intervalSamples = blockSamples / 4;
-    shifter1.configure(numChannels, blockSamples, intervalSamples, false);
-    shifter2.configure(numChannels, blockSamples, intervalSamples, false);
-
-    reverb.setSampleRate(sampleRate);
-    reverbParams.roomSize = 0.8f;
-    reverbParams.damping = 0.3f;
-    reverbParams.wetLevel = 1.0f;
-    reverbParams.dryLevel = 0.0f;
-    reverbParams.width = 0.9f;
-    reverbParams.freezeMode = 0.0f;
-    reverb.setParameters(reverbParams);
-
-    wetBuffer.setSize(numChannels, samplesPerBlock);
-    tempBuffer.setSize(numChannels, samplesPerBlock);
+    juce::ignoreUnused(sampleRate, samplesPerBlock);
 }
 
 void AudioPluginAudioProcessor::releaseResources() {
-    // When playback stops, you can use this as an opportunity to free up any
-    // spare memory, etc.
 }
 
 bool AudioPluginAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const {
-#if JucePlugin_IsMidiEffect
-    juce::ignoreUnused(layouts);
-    return true;
-#else
-    // This is the place where you check if the layout is supported.
-    // In this template code we only support mono or stereo.
-    // Some plugin hosts, such as certain GarageBand versions, will only
-    // load plugins that support stereo bus layouts.
-    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono()
-        && layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
-        return false;
-
-    // This checks if the input layout matches the output layout
-#if !JucePlugin_IsSynth
-    if (layouts.getMainOutputChannelSet() != layouts.getMainInputChannelSet())
-        return false;
-#endif
-
-    return true;
-#endif
+    const auto output = layouts.getMainOutputChannelSet();
+    return output == juce::AudioChannelSet::mono()
+        || output == juce::AudioChannelSet::stereo();
 }
 
-void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages) {
-    juce::ignoreUnused(midiMessages);
+void AudioPluginAudioProcessor::processBlock(
+    juce::AudioBuffer<float>& buffer,
+    juce::MidiBuffer& midiMessages
+) {
     juce::ScopedNoDenormals noDenormals;
+    buffer.clear();
 
-    auto totalNumInputChannels = getTotalNumInputChannels();
-    auto totalNumOutputChannels = getTotalNumOutputChannels();
-    int numSamples = buffer.getNumSamples();
+    if (!midiConsumerActive.load(std::memory_order_relaxed))
+        return;
 
-    // Clear unused output channels
-    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
-        buffer.clear(i, 0, numSamples);
-
-    // Pointers for signalsmith
-    std::vector<const float*> sourcePtrs(totalNumInputChannels);
-    std::vector<float*> shift1Ptrs(totalNumInputChannels);
-    std::vector<float*> shift2Ptrs(totalNumInputChannels);
-
-    for (int c = 0; c < totalNumInputChannels; ++c) {
-        sourcePtrs[c] = buffer.getReadPointer(c);
-        shift1Ptrs[c] = wetBuffer.getWritePointer(c);
-        shift2Ptrs[c] = tempBuffer.getWritePointer(c);
+    for (const auto metadata : midiMessages) {
+        const auto message = metadata.getMessage();
+        if (message.isNoteOn())
+            pushMidiTrigger(message.getFloatVelocity());
     }
+}
 
-    // Pitch shift
-    wetBuffer.clear();
+void AudioPluginAudioProcessor::pushMidiTrigger(float velocity) noexcept {
+    const auto write = midiFifo.write(1);
+    if (write.blockSize1 > 0)
+        midiQueue[static_cast<size_t>(write.startIndex1)] = { velocity };
+}
 
-    bool shift1On = apvts.getRawParameterValue("shift1On")->load();
-    bool shift2On = apvts.getRawParameterValue("shift2On")->load();
+int AudioPluginAudioProcessor::popMidiTriggers(
+    MidiTrigger* destination,
+    int maximumToRead
+) noexcept {
+    if (destination == nullptr || maximumToRead <= 0)
+        return 0;
 
-    if (shift1On) {
-        float shiftValue1 = *apvts.getRawParameterValue("shift1");
-        shifter1.setTransposeSemitones(shiftValue1);
-        shifter1.process(sourcePtrs, numSamples, shift1Ptrs, numSamples);
-    }
+    const auto read = midiFifo.read(maximumToRead);
+    int copied = 0;
 
-    if (shift2On) {
-        float shiftValue2 = *apvts.getRawParameterValue("shift2");
-        shifter2.setTransposeSemitones(shiftValue2);
-        shifter2.process(sourcePtrs, numSamples, shift2Ptrs, numSamples);
+    for (int index = 0; index < read.blockSize1; ++index)
+        destination[copied++] = midiQueue[static_cast<size_t>(read.startIndex1 + index)];
 
-        for (int c = 0; c < totalNumInputChannels; ++c) {
-            wetBuffer.addFrom(c, 0, tempBuffer, c, 0, numSamples, 1.0f);
-        }
-    }
+    for (int index = 0; index < read.blockSize2; ++index)
+        destination[copied++] = midiQueue[static_cast<size_t>(read.startIndex2 + index)];
 
-    // Reverb
-    if (totalNumInputChannels == 2) {
-        reverb.processStereo(wetBuffer.getWritePointer(0), wetBuffer.getWritePointer(1), numSamples);
-    } else if (totalNumInputChannels == 1) {
-        reverb.processMono(wetBuffer.getWritePointer(0), numSamples);
-    }
+    return copied;
+}
 
-    // Mix wet signal into main buffer
-    float mixAmount = *apvts.getRawParameterValue("mix");
-
-    for (int c = 0; c < totalNumInputChannels; ++c) {
-        buffer.addFrom(c, 0, wetBuffer, c, 0, numSamples, mixAmount);
-    }
+void AudioPluginAudioProcessor::setMidiConsumerActive(bool shouldBeActive) noexcept {
+    midiConsumerActive.store(shouldBeActive, std::memory_order_relaxed);
 }
 
 bool AudioPluginAudioProcessor::hasEditor() const {
@@ -192,48 +117,13 @@ juce::AudioProcessorEditor* AudioPluginAudioProcessor::createEditor() {
 }
 
 void AudioPluginAudioProcessor::getStateInformation(juce::MemoryBlock& destData) {
-    // You should use this method to store your parameters in the memory block.
-    // You could do that either as raw data, or use the XML or ValueTree classes
-    // as intermediaries to make it easy to save and load complex data.
-    juce::ignoreUnused(destData);
+    destData.reset();
 }
 
 void AudioPluginAudioProcessor::setStateInformation(const void* data, int sizeInBytes) {
-    // You should use this method to restore your parameters from this memory
-    // block, whose contents will have been created by the getStateInformation()
-    // call.
     juce::ignoreUnused(data, sizeInBytes);
 }
 
-// This creates new instances of the plugin..
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() {
     return new AudioPluginAudioProcessor();
-}
-
-juce::AudioProcessorValueTreeState::ParameterLayout AudioPluginAudioProcessor::createParameterLayout() {
-    juce::AudioProcessorValueTreeState::ParameterLayout layout;
-
-    layout.add(
-        std::make_unique<juce::AudioParameterFloat>(
-            "shift1", "Shift 1", juce::NormalisableRange<float>(-12.0f, 24.0f, 1.0f), 0.0f
-        )
-    );
-
-    layout.add(std::make_unique<juce::AudioParameterBool>("shift1On", "Shift 1 On", true));
-
-    layout.add(
-        std::make_unique<juce::AudioParameterFloat>(
-            "shift2", "Shift 2", juce::NormalisableRange<float>(-12.0f, 24.0f, 1.0f), 12.0f
-        )
-    );
-
-    layout.add(std::make_unique<juce::AudioParameterBool>("shift2On", "Shift 2 On", true));
-
-    layout.add(
-        std::make_unique<juce::AudioParameterFloat>(
-            "mix", "Mix", juce::NormalisableRange<float>(0.0f, 1.0f, 0.1f), 0.5f
-        )
-    );
-
-    return layout;
 }

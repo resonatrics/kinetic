@@ -1,89 +1,120 @@
 #include "PluginEditor.h"
-#include "PluginProcessor.h"
 
-AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor(AudioPluginAudioProcessor& p)
-    : AudioProcessorEditor(&p)
-    , processorRef(p) {
-    juce::ignoreUnused(processorRef);
+#include <KineticAssets.h>
 
-    // Shift Slider 1
-    shiftSlider1.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-    shiftSlider1.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 50, 20);
-    addAndMakeVisible(shiftSlider1);
+#include <cstddef>
+#include <vector>
 
-    shiftLabel1.setText("Pitch 1", juce::NotificationType::dontSendNotification);
-    shiftLabel1.setJustificationType(juce::Justification::centred);
-    shiftLabel1.attachToComponent(&shiftSlider1, false);
-    addAndMakeVisible(shiftLabel1);
-
-    shiftAttachment1 = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        processorRef.apvts, "shift1", shiftSlider1
-    );
-
-    // Shift Toggle 1
-    shift1Toggle.setButtonText("On/Off");
-    addAndMakeVisible(shift1Toggle);
-
-    shift1ToggleAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        processorRef.apvts, "shift1On", shift1Toggle
-    );
-
-    // Shift Slider 2
-    shiftSlider2.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-    shiftSlider2.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 50, 20);
-    addAndMakeVisible(shiftSlider2);
-
-    shiftLabel2.setText("Pitch 2", juce::NotificationType::dontSendNotification);
-    shiftLabel2.setJustificationType(juce::Justification::centred);
-    shiftLabel2.attachToComponent(&shiftSlider2, false);
-    addAndMakeVisible(shiftLabel2);
-
-    shiftAttachment2 = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        processorRef.apvts, "shift2", shiftSlider2
-    );
-
-    // Shift Toggle 2
-    shift2Toggle.setButtonText("On/Off");
-    addAndMakeVisible(shift2Toggle);
-
-    shift2ToggleAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        processorRef.apvts, "shift2On", shift2Toggle
-    );
-
-    // Mix Slider
-    mixSlider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-    mixSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 50, 20);
-    addAndMakeVisible(mixSlider);
-
-    mixLabel.setText("Mix", juce::NotificationType::dontSendNotification);
-    mixLabel.setJustificationType(juce::Justification::centred);
-    mixLabel.attachToComponent(&mixSlider, false);
-    addAndMakeVisible(mixLabel);
-
-    mixAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        processorRef.apvts, "mix", mixSlider
-    );
-
-    setSize(400, 300);
+namespace {
+std::vector<std::byte> copyBytes(const char* data, int size) {
+    const auto* first = reinterpret_cast<const std::byte*>(data);
+    return { first, first + size };
 }
 
-AudioPluginAudioProcessorEditor::~AudioPluginAudioProcessorEditor() { }
+juce::WebBrowserComponent::Resource makeResource(
+    const char* data,
+    int size,
+    const juce::String& mimeType
+) {
+    return { copyBytes(data, size), mimeType };
+}
+} // namespace
 
-void AudioPluginAudioProcessorEditor::paint(juce::Graphics& g) {
-    g.fillAll(juce::Colour(125, 175, 250));
+juce::WebBrowserComponent::Options AudioPluginAudioProcessorEditor::createBrowserOptions(
+    AudioPluginAudioProcessorEditor& owner
+) {
+    auto options = juce::WebBrowserComponent::Options {}
+        .withNativeIntegrationEnabled()
+        .withEventListener("frontendReady", [&owner](const juce::var&) {
+            owner.browserReady = true;
+        })
+        .withResourceProvider([](const juce::String& url) {
+            return getResource(url);
+        });
 
-    g.setColour(juce::Colours::white);
-    g.setFont(15.0f);
+#if JUCE_WINDOWS
+    auto userDataFolder = juce::File::getSpecialLocation(juce::File::tempDirectory)
+        .getChildFile("Kinetic-WebView2");
+    userDataFolder.createDirectory();
+
+    options = options
+        .withBackend(juce::WebBrowserComponent::Options::Backend::webview2)
+        .withWinWebView2Options(
+            juce::WebBrowserComponent::Options::WinWebView2 {}
+                .withUserDataFolder(userDataFolder)
+                .withStatusBarDisabled()
+                .withBuiltInErrorPageDisabled()
+                .withBackgroundColour(juce::Colours::transparentBlack)
+        );
+#endif
+
+    return options;
+}
+
+std::optional<juce::WebBrowserComponent::Resource>
+AudioPluginAudioProcessorEditor::getResource(const juce::String& url) {
+    const auto path = url.upToFirstOccurrenceOf("?", false, false);
+
+    if (path == "/" || path == "/index.html")
+        return makeResource(KineticAssets::index_html, KineticAssets::index_htmlSize, "text/html");
+
+    if (path == "/index.js")
+        return makeResource(KineticAssets::index_js, KineticAssets::index_jsSize, "text/javascript");
+
+    if (path == "/styles.css")
+        return makeResource(KineticAssets::styles_css, KineticAssets::styles_cssSize, "text/css");
+
+    return std::nullopt;
+}
+
+AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor(
+    AudioPluginAudioProcessor& processor
+)
+    : AudioProcessorEditor(&processor),
+      processorRef(processor),
+      webComponent(createBrowserOptions(*this)) {
+    setOpaque(true);
+    addAndMakeVisible(webComponent);
+
+    setResizable(true, true);
+    setResizeLimits(760, 480, 1920, 1200);
+    setSize(1040, 680);
+
+    processorRef.setMidiConsumerActive(true);
+    startTimerHz(60);
+    webComponent.goToURL(juce::WebBrowserComponent::getResourceProviderRoot());
+}
+
+AudioPluginAudioProcessorEditor::~AudioPluginAudioProcessorEditor() {
+    stopTimer();
+    processorRef.setMidiConsumerActive(false);
+}
+
+void AudioPluginAudioProcessorEditor::paint(juce::Graphics& graphics) {
+    graphics.fillAll(juce::Colour(0xff090b0f));
 }
 
 void AudioPluginAudioProcessorEditor::resized() {
-    shiftSlider1.setBounds(getLocalBounds().getCentreX() - 100, getLocalBounds().getCentreY() - 100, 100, 100);
+    webComponent.setBounds(getLocalBounds());
+}
 
-    shift1Toggle.setBounds(getLocalBounds().getCentreX() - 200, getLocalBounds().getCentreY() - 100, 100, 100);
+void AudioPluginAudioProcessorEditor::timerCallback() {
+    const auto count = processorRef.popMidiTriggers(
+        triggerBatch.data(),
+        static_cast<int>(triggerBatch.size())
+    );
 
-    shiftSlider2.setBounds(getLocalBounds().getCentreX(), getLocalBounds().getCentreY() - 100, 100, 100);
+    if (!browserReady || count == 0)
+        return;
 
-    shift2Toggle.setBounds(getLocalBounds().getCentreX() + 100, getLocalBounds().getCentreY() - 100, 100, 100);
+    juce::Array<juce::var> triggers;
+    triggers.ensureStorageAllocated(count);
 
-    mixSlider.setBounds(getLocalBounds().getCentreX() - 50, getLocalBounds().getCentreY() + 20, 100, 100);
+    for (int index = 0; index < count; ++index) {
+        auto* trigger = new juce::DynamicObject();
+        trigger->setProperty("velocity", triggerBatch[static_cast<size_t>(index)].velocity);
+        triggers.add(juce::var(trigger));
+    }
+
+    webComponent.emitEventIfBrowserIsVisible("midiTriggers", juce::var(std::move(triggers)));
 }

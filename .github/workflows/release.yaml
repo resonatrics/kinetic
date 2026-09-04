@@ -16,52 +16,68 @@ jobs:
             cmake_flags: '-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"'
           - os: windows-latest
             cmake_flags: ''
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           submodules: recursive
-      
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.25.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Build web UI
+        run: |
+          pnpm --dir ui install --frozen-lockfile
+          pnpm --dir ui build
+
       - name: Build plugin
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_flags }}
           cmake --build build --config Release --parallel
-      
+
       - name: Package artifacts (macOS)
         if: matrix.os == 'macos-latest'
         run: |
           mkdir -p release
-          cp -r build/FrostReverb_artefacts/Release/VST3/* release/
-          cp -r build/FrostReverb_artefacts/Release/AU/* release/
-          cp -r build/FrostReverb_artefacts/Release/Standalone/*.app release/
-          cd release && zip -r FrostReverb-${{ github.ref_name }}-macOS-Universal.zip *
-      
+          cp -r build/Kinetic_artefacts/Release/VST3/* release/
+          cp -r build/Kinetic_artefacts/Release/Standalone/Kinetic.app release/
+          cd release && zip -r Kinetic-${{ github.ref_name }}-macOS-Universal.zip *
+
       - name: Package artifacts (Windows)
         if: matrix.os == 'windows-latest'
         run: |
           mkdir release
-          Copy-Item -Path "build\FrostReverb_artefacts\Release\VST3\*" -Destination release -Recurse
-          Copy-Item -Path "build\FrostReverb_artefacts\Release\Standalone\*.exe" -Destination release
-          Compress-Archive -Path release\* -DestinationPath release\FrostReverb-${{ github.ref_name }}-Windows-x64.zip
+          Copy-Item -Path "build\Kinetic_artefacts\Release\VST3\*" -Destination release -Recurse
+          Copy-Item -Path "build\Kinetic_artefacts\Release\Standalone\Kinetic.exe" -Destination release
+          Compress-Archive -Path release\* -DestinationPath release\Kinetic-${{ github.ref_name }}-Windows-x64.zip
         shell: powershell
-      
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: plugin-${{ matrix.os }}
           path: release/*
-  
+
   release:
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    
+
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
-      
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:

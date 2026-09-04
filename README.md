@@ -1,34 +1,51 @@
-# ❄ Frost Reverb
+# Kinetic
 
-Shimmer reverb audio effect plugin. Adds two adjustable pitch-shifted layers, passes them through reverb, and combines with the original dry signal.
+Kinetic is a silent MIDI instrument that turns an uploaded video into a WebGPU motion heatmap. Incoming MIDI note-ons trigger a configurable modulation envelope for one heatmap parameter.
 
-## Download Instructions
+## FL Studio workflow
 
-You can download the plugin for Windows and macOS through the [GitHub releases](https://github.com/resonatrics/frost-reverb/releases).
+1. Load `Kinetic.vst3` as an instrument in the Channel Rack.
+2. Open Kinetic and choose a video.
+3. Start the video with Kinetic's local play button. Video playback is independent of FL Studio's transport.
+4. Add notes at any pitch to Kinetic's Piano Roll. Every note-on triggers the same envelope; note pitch and duration are ignored.
+5. Choose the modulation target, amount, attack, release, and whether velocity scales the envelope.
 
-Note: For macOS you will need to run this command in your terminal after unzipping to remove Apple's quarantine attribute since the programs are unsigned:
+Kinetic intentionally produces silence. If MIDI or timing is interrupted, disable **Smart disable** for Kinetic in FL Studio's plug-in wrapper settings.
+
+The uploaded video and UI settings are session-only and are not restored with the DAW project.
+
+## Build
+
+Requirements:
+
+- CMake 3.22+
+- A C++17 compiler
+- Node.js and pnpm
+- Windows: Visual Studio 2022 and the WebView2 Runtime
+
+Clone with the JUCE submodule and build:
+
 ```sh
-xattr -cr /path/to/FrostReverb-v0.0.1-macOS-Universal  # Replace version with your version
-```
-
-Alternatively, you can follow the build instructions below to build the app from scratch.
-
-## Build Instructions
-
-Clone the repo:
-```sh
-git clone --recurse-submodules https://github.com/resonatrics/frost-reverb.git
-```
-
-Configure the project, generate build files, and compile:
-```sh
+git clone --recurse-submodules <repository-url>
+cd kinetic
 make build
 ```
 
-VST3, AU (if on Mac), and standalone executable will be created in `build/FrostReverb_artefacts/Release/`.
+Or run the steps directly:
+
+```sh
+cd ui
+pnpm install
+pnpm build
+cd ..
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --parallel
+```
+
+The VST3 and standalone application are written to `build/Kinetic_artefacts/Release/`.
+
+On Windows, CMake downloads the WebView2 SDK used to build the plug-in. The small WebView2 loader is linked into Kinetic; the WebView2 Runtime itself remains a system dependency.
 
 ## License
 
-This project is licensed under the AGPL-3.0 license.
-
-Music or audio created using this plugin is not affected by this license. You retain full rights to your creative output and can distribute or sell it without any restrictions.
+AGPL-3.0. See `THIRD_PARTY_NOTICES.md` for third-party material.

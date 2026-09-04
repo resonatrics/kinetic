@@ -1,17 +1,21 @@
 #pragma once
 
-#include "signalsmith/signalsmith-stretch.h"
-#include <juce_audio_basics/juce_audio_basics.h>
+#include <array>
+#include <atomic>
+#include <cstddef>
 #include <juce_audio_processors/juce_audio_processors.h>
 
 class AudioPluginAudioProcessor final : public juce::AudioProcessor {
 public:
+    struct MidiTrigger {
+        float velocity = 0.0f;
+    };
+
     AudioPluginAudioProcessor();
     ~AudioPluginAudioProcessor() override;
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
-
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
 
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
@@ -21,7 +25,6 @@ public:
     bool hasEditor() const override;
 
     const juce::String getName() const override;
-
     bool acceptsMidi() const override;
     bool producesMidi() const override;
     bool isMidiEffect() const override;
@@ -36,18 +39,17 @@ public:
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
 
-    juce::AudioProcessorValueTreeState apvts;
+    int popMidiTriggers(MidiTrigger* destination, int maximumToRead) noexcept;
+    void setMidiConsumerActive(bool shouldBeActive) noexcept;
 
 private:
-    juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+    static constexpr int midiQueueCapacity = 1024;
 
-    signalsmith::stretch::SignalsmithStretch<float> shifter1;
-    signalsmith::stretch::SignalsmithStretch<float> shifter2;
-    juce::Reverb reverb;
-    juce::Reverb::Parameters reverbParams;
+    void pushMidiTrigger(float velocity) noexcept;
 
-    juce::AudioBuffer<float> wetBuffer;
-    juce::AudioBuffer<float> tempBuffer;
+    std::array<MidiTrigger, midiQueueCapacity> midiQueue {};
+    juce::AbstractFifo midiFifo { midiQueueCapacity };
+    std::atomic<bool> midiConsumerActive { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioPluginAudioProcessor)
 };
